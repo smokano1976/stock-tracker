@@ -246,7 +246,7 @@ input[type="date"].modal-input { color-scheme:dark; cursor:pointer; }
 <div id="holdingView">
   <div class="price-card">
     <div class="price-label">目前股價</div>
-    <input class="price-input" id="currentPrice" type="number" placeholder="0" oninput="recalcAll()" />
+    <input class="price-input" id="currentPrice" type="number" placeholder="0" oninput="recalcAll()" onfocus="this.select()" />
     <span class="currency">元</span>
   </div>
   <div class="summary-row">
@@ -270,7 +270,7 @@ input[type="date"].modal-input { color-scheme:dark; cursor:pointer; }
       <table>
         <thead><tr>
           <th>買進日期</th><th>股數</th><th>買進單價</th><th>手續費</th>
-          <th>總成本</th><th>損益(元)</th><th>投報率</th><th></th>
+          <th>總成本</th><th>損益(元)</th><th>投報率</th><th>備註</th><th></th>
         </tr></thead>
         <tbody id="stockTable"></tbody>
       </table>
@@ -453,8 +453,15 @@ async function init(){
     if(data.stocks&&data.stocks.length>0){
       stocks=data.stocks.map(s=>({
         ...s, stockType:s.stockType||'stock',
-        holdings:(s.holdings||[]).map(h=>({...h,date:fixDate(h.date)})),
-        realized:(s.realized||[]).map(r=>({...r,buyDate:fixDate(r.buyDate),sellDate:fixDate(r.sellDate)}))
+        holdings:(s.holdings||[]).map(h=>({...h, date:fixDate(h.date), note:h.note||''})),
+        realized:(s.realized||[]).map(r=>({
+          ...r,
+          buyDate:fixDate(r.buyDate),
+          sellDate:fixDate(r.sellDate),
+          sellFee: Number(r.sellFee||r.sell_fee||0),
+          sellTax: Number(r.sellTax||r.sell_tax||0),
+          pnl: Number(r.pnl||0)
+        }))
       }));
       activeId=stocks.find(s=>s.holdings.length>0)?.id||stocks[0].id;
     } else {
@@ -503,9 +510,13 @@ function renderStockTabs(){
   const active=stocks.filter(s=>s.holdings.length>0);
   if(!active.length) wrap.innerHTML='<span style="font-size:13px;color:var(--text2);">目前無持倉股票</span>';
   active.forEach(s=>{
+    const hasNote = s.holdings.some(h=>h.note&&h.note.trim()!=='');
     const btn=document.createElement('button');
     btn.className='stock-tab'+(s.id===activeId?' active':'');
-    btn.innerHTML=`${s.name} <span class="tab-code">${s.code}</span>`;
+    btn.innerHTML=`
+      ${s.name} <span class="tab-code">${s.code}</span>
+      ${hasNote ? `<span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--yellow);margin-left:2px;flex-shrink:0;" title="有備註待確認"></span>` : ''}
+    `;
     btn.onclick=()=>{activeId=s.id;renderAll();};
     wrap.appendChild(btn);
   });
@@ -521,7 +532,8 @@ function renderAll(){
   document.getElementById('stockNameBadge').textContent=`${s.name}（${s.code}）`;
   document.getElementById('holdingTitle').textContent=`${s.name} 持倉明細`;
   document.getElementById('currentPrice').value=s.currentPrice||'';
-  renderHolding(); renderRealized();
+  renderHolding();
+  if(currentView==='realized') renderRealized();
 }
 
 function renderHolding(){
@@ -544,6 +556,7 @@ function renderHolding(){
       rateHtml=`<span class="${cls}">${sign}${rate}%</span>`;
     }
     const tr=document.createElement('tr');
+    const noteCls = r.note ? 'style="color:var(--yellow);"' : '';
     tr.innerHTML=`
       <td><input class="edit-input" type="date" value="${r.date}" onchange="updateRow('${r.id}','date',this.value)"/></td>
       <td><input class="edit-input" style="width:68px;" value="${r.qty}" onchange="updateRow('${r.id}','qty',this.value)"/></td>
@@ -551,6 +564,7 @@ function renderHolding(){
       <td><input class="edit-input" style="width:60px;" value="${r.fee.toFixed(0)}" onchange="updateRow('${r.id}','fee',this.value)"/></td>
       <td style="color:var(--text2)">${fmt(cost)}</td>
       <td>${pnlHtml}</td><td>${rateHtml}</td>
+      <td><input class="edit-input" style="width:110px;text-align:left;${r.note?'color:var(--yellow);':''}" placeholder="輸入備註…" value="${r.note||''}" onchange="updateRow('${r.id}','note',this.value)"/></td>
       <td><div class="action-btns">
         <button class="sell-btn" onclick="openSellModal('${r.id}')">賣出</button>
         <button class="del-btn" onclick="deleteRow('${r.id}')">刪</button>
@@ -560,11 +574,16 @@ function renderHolding(){
   updateSummary(cp);
 }
 
-function updateRow(id,field,val){
+function updateRow(id, field, val){
   const s=getStock(); const r=s.holdings.find(x=>x.id===id); if(!r) return;
-  r[field]=field==='date'?val:(parseFloat(val)||0);
-  renderHolding();
-  debounceSave('h_'+id,()=>apiCall({action:'saveHolding',data:JSON.stringify({...r,stockId:s.id})}));
+  if(field==='date' || field==='note'){
+    r[field] = val;
+  } else {
+    r[field] = parseFloat(val)||0;
+  }
+  // 備註欄不重新渲染（避免游標跑掉），其他欄位重新渲染
+  if(field !== 'note') renderHolding();
+  debounceSave('h_'+id, ()=>apiCall({action:'saveHolding', data:JSON.stringify({...r, stockId:s.id})}));
 }
 function deleteRow(id){
   const s=getStock();
@@ -674,9 +693,13 @@ async function confirmSell(){
   if(!sd){alert('請選擇賣出日期');return;}
   const {sellAmt,fee,tax}=calcSellFees(sp,r.qty,disc,taxType);
   const buyCost=totalCost(r);
-  const realized={stockId:s.id,buyDate:r.date,sellDate:sd,qty:r.qty,
-    buyPrice:r.buyPrice,sellPrice:sp,buyCost,sellAmt,sellFee:fee,sellTax:tax,
-    pnl:sellAmt-fee-tax-buyCost};
+  const realized={
+    stockId:s.id, buyDate:r.date, sellDate:sd, qty:r.qty,
+    buyPrice:r.buyPrice, sellPrice:sp, buyCost, sellAmt,
+    sellFee:fee, sellTax:tax,
+    pnl:sellAmt-fee-tax-buyCost
+  };
+  console.log('賣出資料：', realized); // 除錯用
   s.realized.push(realized);
   s.holdings=s.holdings.filter(x=>x.id!==pendingSellId);
   const soldId=pendingSellId;
@@ -685,7 +708,9 @@ async function confirmSell(){
     const next=stocks.find(st=>st.id!==s.id&&st.holdings.length>0);
     if(next) activeId=next.id;
   }
-  renderAll();
+  // 只更新畫面，不重新從 Sheets 載入（避免重複）
+  renderStockTabs();
+  renderHolding();
   setSyncStatus('syncing','同步中');
   try{
     await apiCall({action:'deleteHolding',stockId:s.id,rowId:soldId});
@@ -705,10 +730,14 @@ function updateRealized(stockId, idx, field, val){
 }
 
 function renderRealized(){
-  // 收集所有股票已實現記錄
+  // 收集所有股票已實現記錄，並去除重複
+  const seen = new Set();
   const allRealized=[];
   stocks.forEach(s=>{
     (s.realized||[]).forEach((r,idx)=>{
+      const key = `${s.id}_${r.buyDate}_${r.sellDate}_${r.qty}_${r.buyPrice}_${r.sellPrice}`;
+      if(seen.has(key)) return;
+      seen.add(key);
       const pnl=r.sellAmt-(r.sellFee||0)-(r.sellTax||0)-r.buyCost;
       allRealized.push({...r,pnl,stockName:s.name,stockCode:s.code,stockId:s.id,localIdx:idx});
     });
