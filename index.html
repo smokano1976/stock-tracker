@@ -238,10 +238,47 @@ input[type="date"].modal-input { color-scheme:dark; cursor:pointer; }
 
 <div class="view-row">
   <div class="view-tabs">
+    <button class="view-tab" onclick="switchView('overview')">🏠 總覽</button>
     <button class="view-tab active" onclick="switchView('holding')">📊 持倉中</button>
     <button class="view-tab" onclick="switchView('realized')">✅ 已實現損益</button>
   </div>
   <div class="stock-name-badge" id="stockNameBadge"></div>
+</div>
+
+<!-- Overview View -->
+<div id="overviewView" style="display:none;">
+  <div class="summary-row">
+    <div class="summary-card"><div class="s-label">持倉股票數</div><div class="s-value" id="ov_stocks">—</div></div>
+    <div class="summary-card"><div class="s-label">總持股數</div><div class="s-value" id="ov_qty">—</div></div>
+    <div class="summary-card"><div class="s-label">總投入成本</div><div class="s-value" id="ov_cost">—</div></div>
+    <div class="summary-card"><div class="s-label">已實現損益</div><div class="s-value" id="ov_realized">—</div></div>
+  </div>
+  <div class="summary-row">
+    <div class="summary-card" id="ov_card_market"><div class="s-label">目前總市值</div><div class="s-value" id="ov_market">—</div></div>
+    <div class="summary-card" id="ov_card_unrealized"><div class="s-label">未實現損益</div><div class="s-value" id="ov_unrealized">—</div></div>
+    <div class="summary-card" id="ov_card_total"><div class="s-label">總損益（含已實現）</div><div class="s-value" id="ov_total">—</div></div>
+    <div class="summary-card" id="ov_card_rate"><div class="s-label">整體投報率</div><div class="s-value" id="ov_rate">—</div></div>
+  </div>
+
+  <!-- 各股票明細 -->
+  <div class="table-wrap">
+    <div class="table-header">
+      <div class="table-title">各股票持倉狀況</div>
+      <div style="font-size:11px;color:var(--text2);">請先在各股票輸入目前股價</div>
+    </div>
+    <div style="overflow-x:auto;">
+      <table>
+        <thead><tr>
+          <th>股票</th><th>代號</th><th>持股數</th>
+          <th>平均成本</th><th>目前股價</th>
+          <th>投入成本</th><th>目前市值</th>
+          <th>未實現損益</th><th>投報率</th>
+        </tr></thead>
+        <tbody id="overviewTable"></tbody>
+      </table>
+    </div>
+    <div class="note">目前股價請到各股票的「持倉中」頁面輸入</div>
+  </div>
 </div>
 
 <!-- Holding View -->
@@ -895,12 +932,102 @@ function toggleYear(year){
 
 function switchView(v){
   currentView=v;
+  document.getElementById('overviewView').style.display=v==='overview'?'block':'none';
   document.getElementById('holdingView').style.display=v==='holding'?'block':'none';
   document.getElementById('realizedView').style.display=v==='realized'?'block':'none';
   document.querySelectorAll('.view-tab').forEach((btn,i)=>{
-    btn.classList.toggle('active',(i===0&&v==='holding')||(i===1&&v==='realized'));
+    btn.classList.toggle('active',
+      (i===0&&v==='overview')||(i===1&&v==='holding')||(i===2&&v==='realized'));
   });
   if(v==='realized') renderRealized();
+  if(v==='overview') renderOverview();
+}
+
+function renderOverview(){
+  // 已實現損益加總（所有股票）
+  const totalRealizedPnl = stocks.reduce((a,s)=>
+    a + (s.realized||[]).reduce((b,r)=>b+(r.pnl||0), 0), 0);
+
+  // 持倉中的股票統計
+  const holdingStocks = stocks.filter(s=>s.holdings.length>0);
+  let totalCostAll=0, totalMarketAll=0, marketKnown=true;
+
+  const tbody = document.getElementById('overviewTable');
+  tbody.innerHTML='';
+
+  holdingStocks.forEach(s=>{
+    const cp = parseFloat(s.currentPrice)||0;
+    const cost = s.holdings.reduce((a,r)=>a+r.buyPrice*r.qty+r.fee, 0);
+    const totalQty = s.holdings.reduce((a,r)=>a+r.qty, 0);
+    const avgCost = totalQty>0 ? (cost/totalQty).toFixed(2) : 0;
+    totalCostAll += cost;
+
+    let marketHtml='—', pnlHtml='—', rateHtml='—';
+    if(cp>0){
+      const market = cp*totalQty;
+      const pnl = market-cost;
+      const rate = (pnl/cost*100).toFixed(1);
+      const sign = pnl>=0?'+':'';
+      const cls = pnl>=0?'gain':'loss';
+      totalMarketAll += market;
+      marketHtml = fmt(market)+' 元';
+      pnlHtml = `<span class="${cls}">${sign}${fmt(pnl)}</span>`;
+      rateHtml = `<span class="${cls}">${sign}${rate}%</span>`;
+    } else {
+      marketKnown = false;
+    }
+
+    const tr=document.createElement('tr');
+    tr.innerHTML=`
+      <td style="font-weight:600;">${s.name}</td>
+      <td style="color:var(--text2);font-family:'DM Mono',monospace;">${s.code}</td>
+      <td>${totalQty.toLocaleString()}</td>
+      <td style="color:var(--accent);font-weight:600;">${avgCost}</td>
+      <td style="color:var(--yellow);font-weight:600;">${cp>0?cp:'未輸入'}</td>
+      <td style="color:var(--text2)">${fmt(cost)}</td>
+      <td>${marketHtml}</td>
+      <td>${pnlHtml}</td>
+      <td>${rateHtml}</td>`;
+    tbody.appendChild(tr);
+  });
+
+  // 彙總卡片
+  const sign_r = totalRealizedPnl>=0?'+':'';
+  const cls_r = totalRealizedPnl>=0?'gain':'loss';
+  document.getElementById('ov_stocks').textContent = holdingStocks.length+' 檔';
+  document.getElementById('ov_qty').textContent = stocks.reduce((a,s)=>a+s.holdings.reduce((b,r)=>b+r.qty,0),0).toLocaleString()+' 股';
+  document.getElementById('ov_cost').textContent = fmt(totalCostAll)+' 元';
+  document.getElementById('ov_realized').textContent = sign_r+fmt(totalRealizedPnl)+' 元';
+  document.getElementById('ov_realized').className = 's-value '+cls_r;
+
+  if(marketKnown && holdingStocks.length>0 && totalMarketAll>0){
+    const unrealized = totalMarketAll-totalCostAll;
+    const totalPnl = unrealized+totalRealizedPnl;
+    const totalRate = (totalPnl/totalCostAll*100).toFixed(1);
+    const sign_u = unrealized>=0?'+':'';
+    const cls_u = unrealized>=0?'gain':'loss';
+    const sign_t = totalPnl>=0?'+':'';
+    const cls_t = totalPnl>=0?'gain':'loss';
+
+    document.getElementById('ov_market').textContent = fmt(totalMarketAll)+' 元';
+    document.getElementById('ov_unrealized').textContent = sign_u+fmt(unrealized)+' 元';
+    document.getElementById('ov_unrealized').className = 's-value '+cls_u;
+    document.getElementById('ov_card_unrealized').className = 'summary-card '+(unrealized>=0?'s-card-gain':'s-card-loss');
+    document.getElementById('ov_total').textContent = sign_t+fmt(totalPnl)+' 元';
+    document.getElementById('ov_total').className = 's-value '+cls_t;
+    document.getElementById('ov_card_total').className = 'summary-card '+(totalPnl>=0?'s-card-gain':'s-card-loss');
+    document.getElementById('ov_rate').textContent = sign_t+totalRate+'%';
+    document.getElementById('ov_rate').className = 's-value '+cls_t;
+    document.getElementById('ov_card_rate').className = 'summary-card '+(totalPnl>=0?'s-card-gain':'s-card-loss');
+  } else {
+    document.getElementById('ov_market').textContent = '請輸入各股價';
+    document.getElementById('ov_unrealized').textContent = '—';
+    document.getElementById('ov_total').textContent = '—';
+    document.getElementById('ov_rate').textContent = '—';
+    ['ov_card_market','ov_card_unrealized','ov_card_total','ov_card_rate'].forEach(id=>{
+      document.getElementById(id).className='summary-card';
+    });
+  }
 }
 
 // Add Stock Modal
