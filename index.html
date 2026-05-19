@@ -225,6 +225,8 @@ input[type="date"].modal-input { color-scheme:dark; cursor:pointer; }
     <div class="sync-dot" id="syncDot"></div>
     <span id="syncText">連線中</span>
     <span style="color:var(--border);margin:0 2px;">|</span>
+    <span onclick="manualRefresh()" style="cursor:pointer;color:var(--text2);font-size:11px;" title="重新從 Sheets 載入">🔄</span>
+    <span style="color:var(--border);margin:0 2px;">|</span>
     <span onclick="showResetConfirm()" style="cursor:pointer;color:var(--text2);font-size:11px;" title="重新設定 API">⚙️</span>
   </div>
 </div>
@@ -376,6 +378,12 @@ let stocks=[], activeId='', sortMode='asc', pendingSellId=null;
 let currentView='holding', saveTimer={}, taxType='stock', newStockType='stock';
 let collapsedYears = {};
 
+function manualRefresh(){
+  clearCache();
+  setSyncStatus('syncing','重新載入中');
+  syncFromSheets(false);
+}
+
 function showSetupScreen(){
   document.getElementById('loadingOverlay').style.display='none';
   document.getElementById('setupScreen').style.display='flex';
@@ -437,49 +445,89 @@ function debounceSave(key,fn,delay=800){
   clearTimeout(saveTimer[key]);
   saveTimer[key]=setTimeout(async()=>{
     setSyncStatus('syncing','同步中');
-    try{await fn();setSyncStatus('ok','已同步');}
+    try{
+      await fn();
+      saveCache({stocks}); // 同步成功後更新快取
+      setSyncStatus('ok','已同步');
+    }
     catch(e){setSyncStatus('error','同步失敗');}
   },delay);
 }
 
+const CACHE_KEY = 'stock_tracker_cache';
+
+function saveCache(data){
+  try{ localStorage.setItem(CACHE_KEY, JSON.stringify(data)); } catch(e){}
+}
+function loadCache(){
+  try{ const d=localStorage.getItem(CACHE_KEY); return d?JSON.parse(d):null; } catch(e){ return null; }
+}
+function clearCache(){
+  localStorage.removeItem(CACHE_KEY);
+}
+
+function parseStocks(rawStocks){
+  return rawStocks.map(s=>({
+    ...s, stockType:s.stockType||'stock',
+    holdings:(s.holdings||[]).map(h=>({...h, date:fixDate(h.date), note:h.note||''})),
+    realized:(s.realized||[]).map(r=>({
+      ...r,
+      buyDate:fixDate(r.buyDate),
+      sellDate:fixDate(r.sellDate),
+      sellFee: Number(r.sellFee||r.sell_fee||0),
+      sellTax: Number(r.sellTax||r.sell_tax||0),
+      pnl: Number(r.pnl||0)
+    }))
+  }));
+}
+
 async function init(){
-  if(!API){
-    showSetupScreen();
-    return;
-  }
-  try{
-    setSyncStatus('syncing','載入中');
-    const data=await apiCall({action:'getAll'});
-    if(data.stocks&&data.stocks.length>0){
-      stocks=data.stocks.map(s=>({
-        ...s, stockType:s.stockType||'stock',
-        holdings:(s.holdings||[]).map(h=>({...h, date:fixDate(h.date), note:h.note||''})),
-        realized:(s.realized||[]).map(r=>({
-          ...r,
-          buyDate:fixDate(r.buyDate),
-          sellDate:fixDate(r.sellDate),
-          sellFee: Number(r.sellFee||r.sell_fee||0),
-          sellTax: Number(r.sellTax||r.sell_tax||0),
-          pnl: Number(r.pnl||0)
-        }))
-      }));
-      activeId=stocks.find(s=>s.holdings.length>0)?.id||stocks[0].id;
-    } else {
-      stocks=getDefaultStocks();
-      for(const s of stocks){
-        await apiCall({action:'saveStock',data:JSON.stringify({id:s.id,code:s.code,name:s.name,currentPrice:s.currentPrice,stockType:s.stockType})});
-        for(const h of s.holdings) await apiCall({action:'saveHolding',data:JSON.stringify({...h,stockId:s.id})});
-      }
-      activeId=stocks[0].id;
-    }
-    setSyncStatus('ok','已同步');
+  if(!API){ showSetupScreen(); return; }
+
+  // 先嘗試從快取載入，立即顯示畫面
+  const cache = loadCache();
+  if(cache && cache.stocks && cache.stocks.length > 0){
+    stocks = parseStocks(cache.stocks);
+    activeId = stocks.find(s=>s.holdings.length>0)?.id || stocks[0].id;
     document.getElementById('loadingOverlay').style.display='none';
     renderAll();
+    setSyncStatus('syncing','背景同步中…');
+    // 背景靜默同步最新資料
+    syncFromSheets(false);
+    return;
+  }
+
+  // 沒有快取，正常載入
+  setSyncStatus('syncing','載入中');
+  await syncFromSheets(true);
+}
+
+async function syncFromSheets(showLoading){
+  try{
+    const data = await apiCall({action:'getAll'});
+    if(data.stocks && data.stocks.length > 0){
+      stocks = parseStocks(data.stocks);
+      activeId = stocks.find(s=>s.holdings.length>0)?.id || stocks[0].id;
+      saveCache({stocks: data.stocks}); // 存入快取
+    } else {
+      stocks = getDefaultStocks();
+      for(const s of stocks){
+        await apiCall({action:'saveStock', data:JSON.stringify({id:s.id,code:s.code,name:s.name,currentPrice:s.currentPrice,stockType:s.stockType})});
+        for(const h of s.holdings) await apiCall({action:'saveHolding', data:JSON.stringify({...h,stockId:s.id})});
+      }
+      activeId = stocks[0].id;
+      saveCache({stocks});
+    }
+    setSyncStatus('ok','已同步');
+    if(showLoading) document.getElementById('loadingOverlay').style.display='none';
+    renderAll();
   } catch(e){
-    setSyncStatus('error','連線失敗');
-    document.getElementById('loadingOverlay').innerHTML=`
-      <div style="font-size:15px;color:var(--loss);font-weight:600;">⚠️ 無法連線到 Google Sheets</div>
-      <div style="font-size:13px;color:var(--text2);margin-top:8px;">請確認網路連線後重新整理頁面</div>`;
+    setSyncStatus('error','同步失敗');
+    if(showLoading){
+      document.getElementById('loadingOverlay').innerHTML=`
+        <div style="font-size:15px;color:var(--loss);font-weight:600;">⚠️ 無法連線到 Google Sheets</div>
+        <div style="font-size:13px;color:var(--text2);margin-top:8px;">請確認網路連線後重新整理頁面</div>`;
+    }
   }
 }
 
